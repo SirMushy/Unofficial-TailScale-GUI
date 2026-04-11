@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tailscale-controller"
+version = "0.1.0"
+description = "A small unofficial GTK desktop controller for Tailscale on Linux."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [
+  { name = "Mushy" }
+]
+license = { text = "Proprietary" }
+keywords = ["tailscale", "gtk", "linux", "desktop", "utility"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: X11 Applications :: GTK",
+  "Intended Audience :: End Users/Desktop",
+  "License :: Other/Proprietary License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Internet",
+  "Topic :: System :: Networking",
+]
+
+[project.scripts]
+tailscale-controller = "tailscale_controller.app:main"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["tailscale_controller*"]
+
+[tool.setuptools.package-data]
+tailscale_controller = [
+  "assets/images/logo.png",
+  "assets/images/OnOf-Icons/*.svg",
+  "assets/images/os-icons/*.png",
+  "assets/images/os-icons/*.svg",
+  "assets/images/ui-icons/*.svg",
+]

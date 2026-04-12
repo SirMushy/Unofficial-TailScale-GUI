@@ -16,6 +16,7 @@ class StatusPage(Gtk.Box):
     ASSETS_DIR = Path(__file__).resolve().parent / "assets" / "images"
     UI_ICONS_DIR = ASSETS_DIR / "ui-icons"
     OS_ICONS_DIR = ASSETS_DIR / "os-icons"
+    BUTTON_LABEL_RESET_DELAY_MS = 900
 
     def __init__(self, app):
         # Build this page as a vertical layout
@@ -25,6 +26,8 @@ class StatusPage(Gtk.Box):
         self.app = app
         self.all_devices = []
         self.backend_state = "unknown"
+        self._toolbar_icon_cache = {}
+        self._os_icon_cache = {}
 
         # Add small CSS helpers for temporary Ping button flashes
         css_provider = Gtk.CssProvider()
@@ -143,14 +146,8 @@ class StatusPage(Gtk.Box):
 
     def build_toolbar_icon(self, icon_name):
         # Load small toolbar artwork from the shared UI icon folder
-        icon_path = self.UI_ICONS_DIR / icon_name
-        if os.path.exists(icon_path):
-            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
-                os.fspath(icon_path),
-                width=16,
-                height=16,
-                preserve_aspect_ratio=True
-            )
+        pixbuf = self.load_cached_pixbuf(self.UI_ICONS_DIR / icon_name, 16, 16)
+        if pixbuf is not None:
             return Gtk.Image.new_from_pixbuf(pixbuf)
 
         return Gtk.Image.new_from_icon_name("system-search-symbolic", Gtk.IconSize.MENU)
@@ -191,46 +188,57 @@ class StatusPage(Gtk.Box):
     def build_os_icon(self, device):
         # Use a custom image when available, otherwise fall back to themed icons
         os_name = str(device.get("OS", "")).lower()
-        try:
-            if "linux" in os_name:
-                linux_icon_path = self.OS_ICONS_DIR / "Linux.png"
-                if os.path.exists(linux_icon_path):
-                    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
-                        os.fspath(linux_icon_path),
-                        width=16,
-                        height=16,
-                        preserve_aspect_ratio=True
-                    )
-                    return Gtk.Image.new_from_pixbuf(pixbuf)
+        icon_path = None
 
-            if "windows" in os_name:
-                windows_icon_path = self.OS_ICONS_DIR / "Windows.png"
-                if os.path.exists(windows_icon_path):
-                    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
-                        os.fspath(windows_icon_path),
-                        width=16,
-                        height=16,
-                        preserve_aspect_ratio=True
-                    )
-                    return Gtk.Image.new_from_pixbuf(pixbuf)
+        if "linux" in os_name:
+            icon_path = self.OS_ICONS_DIR / "Linux.png"
+        elif "windows" in os_name:
+            icon_path = self.OS_ICONS_DIR / "Windows.png"
+        elif "android" in os_name:
+            icon_path = self.OS_ICONS_DIR / "android.svg"
 
-            if "android" in os_name:
-                android_icon_path = self.OS_ICONS_DIR / "android.svg"
-                if os.path.exists(android_icon_path):
-                    pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
-                        os.fspath(android_icon_path),
-                        width=16,
-                        height=16,
-                        preserve_aspect_ratio=True
-                    )
-                    return Gtk.Image.new_from_pixbuf(pixbuf)
-        except Exception:
-            pass
+        pixbuf = self.load_cached_pixbuf(icon_path, 16, 16)
+        if pixbuf is not None:
+            return Gtk.Image.new_from_pixbuf(pixbuf)
 
         return Gtk.Image.new_from_icon_name(
             self.get_os_icon_name(device),
             Gtk.IconSize.MENU
         )
+
+    def load_cached_pixbuf(self, icon_path, width, height):
+        # Reuse small scaled artwork so repeated refreshes do not keep hitting disk
+        if icon_path is None:
+            return None
+
+        icon_path = os.fspath(icon_path)
+        cache_key = (icon_path, width, height)
+        if cache_key in self._os_icon_cache:
+            return self._os_icon_cache[cache_key]
+
+        if cache_key in self._toolbar_icon_cache:
+            return self._toolbar_icon_cache[cache_key]
+
+        if not os.path.exists(icon_path):
+            return None
+
+        try:
+            pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
+                icon_path,
+                width=width,
+                height=height,
+                preserve_aspect_ratio=True
+            )
+        except GLib.Error:
+            return None
+
+        cache = (
+            self._toolbar_icon_cache
+            if icon_path.startswith(os.fspath(self.UI_ICONS_DIR))
+            else self._os_icon_cache
+        )
+        cache[cache_key] = pixbuf
+        return pixbuf
 
     def get_device_ip(self, device):
         # Pick the first Tailscale IP for the Copy IP button
@@ -243,14 +251,14 @@ class StatusPage(Gtk.Box):
         # Copy the device IP and show quick feedback on the button
         if not ip_address:
             button.set_label("No IP")
-            GLib.timeout_add(900, self.reset_button_label, button, "Copy IP")
+            GLib.timeout_add(self.BUTTON_LABEL_RESET_DELAY_MS, self.reset_button_label, button, "Copy IP")
             return
 
         clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         clipboard.set_text(ip_address, -1)
         clipboard.store()
         button.set_label("Copied!")
-        GLib.timeout_add(900, self.reset_button_label, button, "Copy IP")
+        GLib.timeout_add(self.BUTTON_LABEL_RESET_DELAY_MS, self.reset_button_label, button, "Copy IP")
 
     def reset_button_label(self, button, text):
         # Restore a temporary button label

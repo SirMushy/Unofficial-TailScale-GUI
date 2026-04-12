@@ -2,6 +2,10 @@
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
+import shutil
+import sys
+import time
 
 # Run Tailscale terminal commands from Python
 import subprocess
@@ -15,12 +19,19 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib, Gtk
 
-# Import the page classes
-from account_page import AccountPage
-from controller_page import ControllerPage
-from status_page import StatusPage
-
 APP_DIR = Path(__file__).resolve().parent
+ 
+# Support both package execution (`python -m tailscale_controller`) and
+# running this file directly from the VS Code Python play button.
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(APP_DIR.parent))
+    from tailscale_controller.account_page import AccountPage
+    from tailscale_controller.controller_page import ControllerPage
+    from tailscale_controller.status_page import StatusPage
+else:
+    from .account_page import AccountPage
+    from .controller_page import ControllerPage
+    from .status_page import StatusPage
 
 
 class TailscaleApp(Gtk.Window):
@@ -31,13 +42,21 @@ class TailscaleApp(Gtk.Window):
     TOGGLE_OFF_ICON_PATH = ASSETS_DIR / "OnOf-Icons" / "TurnOff.svg"
     CONTROLLER_MIN_WIDTH = 336
     CONTROLLER_MIN_HEIGHT = 404
-    ACCOUNT_MIN_WIDTH = 360
-    ACCOUNT_MIN_HEIGHT = 170
+    ACCOUNT_MIN_WIDTH = 340
+    ACCOUNT_MIN_HEIGHT = 250
     STATUS_MIN_WIDTH = 608
     STATUS_MIN_HEIGHT = 560
-    TASKBAR_DOCK_MARGIN = 12
     STATUS_COMMAND_TIMEOUT_SECONDS = 8
     TOGGLE_COMMAND_TIMEOUT_SECONDS = 20
+    LOGIN_COMMAND_WAIT_TIMEOUT_SECONDS = 12
+    LOGIN_AUTH_URL_TIMEOUT = "5s"
+    PING_COMMAND_TIMEOUT_SECONDS = 10
+    STATUS_REFRESH_INTERVAL_MS = 5000
+    ACCOUNT_REFRESH_INTERVAL_MS = 3000
+    DEFAULT_CONTROLLER_MESSAGE = "Manufactured by Mushy"
+    DISCONNECTED_BACKEND_STATES = {"", "stopped", "needslogin"}
+    IDLE_BACKEND_STATES = {"starting", "idle"}
+    DEFAULT_TRAFFIC_BASELINE = {"tx": 0, "rx": 0}
 
     def __init__(self):
         super().__init__(title="Tailscale Controller")
@@ -79,8 +98,10 @@ class TailscaleApp(Gtk.Window):
         self.status_refresh_in_progress = False
         self.pending_status_refresh_include_controller = False
         self.toggle_in_progress = False
+        self.account_action_in_progress = False
         self.account_status_check_in_progress = False
         self.account_sign_in_state = "unknown"
+        self.login_link_dialog_opened = False
 
         # Gtk.Stack lets us swap between pages in the same window
         self.stack = Gtk.Stack()
@@ -104,8 +125,8 @@ class TailscaleApp(Gtk.Window):
         GLib.idle_add(self.lock_to_page_size, "controller")
 
         # Re-check status automatically every 5 seconds
-        GLib.timeout_add(5000, self.auto_refresh_status)
-        GLib.timeout_add(3000, self.auto_refresh_account_status)
+        GLib.timeout_add(self.STATUS_REFRESH_INTERVAL_MS, self.auto_refresh_status)
+        GLib.timeout_add(self.ACCOUNT_REFRESH_INTERVAL_MS, self.auto_refresh_account_status)
 
         # Small keyboard shortcuts help this act more like a utility panel
         self.connect("key-press-event", self.on_key_press_event)
@@ -140,6 +161,130 @@ class TailscaleApp(Gtk.Window):
 
             .hero-caption {
                 color: #7f93a8;
+            }
+
+            .account-shell {
+                border-radius: 18px;
+                border: 1px solid rgba(130, 160, 190, 0.16);
+                background-image: linear-gradient(180deg, #19222c 0%, #11181f 100%);
+                box-shadow: 0 10px 28px rgba(0, 0, 0, 0.28);
+            }
+
+            .account-title {
+                color: #f4f7fb;
+            }
+
+            .account-kicker {
+                color: #8ebdff;
+            }
+
+            .account-subtitle {
+                color: #97a9bc;
+            }
+
+            .account-status-card {
+                border-radius: 14px;
+                border: 1px solid rgba(143, 176, 210, 0.12);
+                background-image: none;
+                background-color: rgba(255, 255, 255, 0.03);
+            }
+
+            .account-status-caption {
+                color: #8ebdff;
+            }
+
+            .account-status-text {
+                color: #eaf2fb;
+            }
+
+            .account-state-pill {
+                border-radius: 999px;
+                padding: 5px 14px;
+                font-weight: 700;
+                letter-spacing: 0.6px;
+            }
+
+            .account-state-pill.account-state-pill-signed-in {
+                color: #e8fff1;
+                background-image: none;
+                background-color: rgba(72, 181, 112, 0.78);
+                border: 1px solid rgba(168, 241, 192, 0.2);
+                box-shadow: 0 4px 12px rgba(38, 115, 67, 0.18);
+            }
+
+            .account-state-pill.account-state-pill-signed-out {
+                color: #ffe7e4;
+                background-image: none;
+                background-color: rgba(176, 58, 46, 0.9);
+                border: 1px solid rgba(255, 205, 199, 0.14);
+            }
+
+            .account-state-pill.account-state-pill-unknown {
+                color: #eaf2fb;
+                background-image: none;
+                background-color: rgba(67, 88, 110, 0.9);
+                border: 1px solid rgba(190, 207, 227, 0.14);
+            }
+
+            .account-note-box {
+                border-radius: 12px;
+                border: 1px solid rgba(142, 189, 255, 0.14);
+                background-image: none;
+                background-color: rgba(64, 108, 160, 0.14);
+            }
+
+            .account-note-icon {
+                color: #ffd36b;
+            }
+
+            .account-note-text {
+                color: #bdd6f6;
+            }
+
+            .login-dialog {
+                background-image: linear-gradient(180deg, #18212b 0%, #10171e 100%);
+            }
+
+            .login-dialog-card {
+                border-radius: 18px;
+                border: 1px solid rgba(143, 176, 210, 0.12);
+                background-image: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
+                padding: 18px;
+            }
+
+            .login-dialog-kicker {
+                color: #8ebdff;
+            }
+
+            .login-dialog-title {
+                color: #f4f7fb;
+            }
+
+            .login-dialog-body {
+                color: #bdd6f6;
+            }
+
+            .login-dialog-link-shell {
+                border-radius: 14px;
+                border: 1px solid rgba(94, 214, 150, 0.18);
+                background-image: none;
+                background-color: rgba(40, 88, 67, 0.28);
+                padding: 14px;
+            }
+
+            .login-dialog-link-value {
+                color: #e8fff1;
+            }
+
+            .login-dialog-output-label {
+                color: #8ebdff;
+            }
+
+            .login-dialog-output {
+                border-radius: 14px;
+                border: 1px solid rgba(143, 176, 210, 0.12);
+                background-image: none;
+                background-color: rgba(8, 13, 18, 0.62);
             }
 
             button.hero-toggle {
@@ -193,6 +338,20 @@ class TailscaleApp(Gtk.Window):
             text=True,
             timeout=timeout
         )
+
+    def run_privileged_command(self, command, timeout=None):
+        # Prefer a GUI authentication prompt when available, then fall back to sudo
+        if shutil.which("pkexec"):
+            command_to_run = ["pkexec", *command]
+        else:
+            command_to_run = ["sudo", *command]
+        return self.run_command(command_to_run, timeout=timeout)
+
+    def build_privileged_command(self, command):
+        # Build the elevated command once so both run() and Popen() use the same policy
+        if shutil.which("pkexec"):
+            return ["pkexec", *command]
+        return ["sudo", *command]
 
     def run_in_background(self, target, *args):
         # Keep shell work off the GTK thread so the window stays responsive
@@ -257,8 +416,7 @@ class TailscaleApp(Gtk.Window):
     def get_connection_state(self, data):
         # Decide if the main toggle should treat Tailscale as connected
         backend_state = str(data.get("BackendState", "")).lower()
-        disconnected_states = {"", "stopped", "needslogin"}
-        return backend_state not in disconnected_states
+        return backend_state not in self.DISCONNECTED_BACKEND_STATES
 
     def get_device_name(self, device):
         # Pick a short, user-facing name and avoid raw IPs where possible
@@ -352,10 +510,10 @@ class TailscaleApp(Gtk.Window):
         # Convert the main backend state into one home-page status
         backend_state = str(data.get("BackendState", "")).lower()
 
-        if backend_state in {"", "stopped", "needslogin"}:
+        if backend_state in self.DISCONNECTED_BACKEND_STATES:
             return "offline"
 
-        if backend_state in {"starting", "idle"}:
+        if backend_state in self.IDLE_BACKEND_STATES:
             return "idle"
 
         return "online"
@@ -388,7 +546,7 @@ class TailscaleApp(Gtk.Window):
             return ""
 
         device_key = self.get_device_key(device)
-        baseline = self.traffic_baselines.get(device_key, {"tx": 0, "rx": 0})
+        baseline = self.traffic_baselines.get(device_key, self.DEFAULT_TRAFFIC_BASELINE)
 
         display_tx = max(0, tx_bytes - baseline["tx"])
         display_rx = max(0, rx_bytes - baseline["rx"])
@@ -430,16 +588,8 @@ class TailscaleApp(Gtk.Window):
         if device.get("Online"):
             return ""
 
-        last_seen_text = str(device.get("LastSeen") or "").strip()
-        if not last_seen_text:
-            return "Last online unknown"
-
-        try:
-            normalized_text = last_seen_text.replace("Z", "+00:00")
-            last_seen = datetime.fromisoformat(normalized_text)
-            if last_seen.tzinfo is None:
-                last_seen = last_seen.replace(tzinfo=timezone.utc)
-        except (ValueError, OverflowError):
+        last_seen = self.parse_last_seen(device)
+        if last_seen is None:
             return "Last online unknown"
 
         try:
@@ -465,6 +615,48 @@ class TailscaleApp(Gtk.Window):
         except (ValueError, OverflowError, OSError):
             return "Last online unknown"
 
+    def parse_last_seen(self, device):
+        # Parse the Tailscale LastSeen timestamp into a timezone-aware datetime
+        last_seen_text = str(device.get("LastSeen") or "").strip()
+        if not last_seen_text:
+            return None
+
+        try:
+            normalized_text = last_seen_text.replace("Z", "+00:00")
+            last_seen = datetime.fromisoformat(normalized_text)
+        except (ValueError, OverflowError):
+            return None
+
+        if last_seen.tzinfo is None:
+            last_seen = last_seen.replace(tzinfo=timezone.utc)
+
+        return last_seen
+
+    def get_device_sort_key(self, device):
+        # Keep the local machine first, then online peers by name,
+        # then offline peers by most recently seen.
+        is_self = bool(device.get("_is_self"))
+        if is_self:
+            return (0, "", 0.0, "")
+
+        is_online = bool(device.get("Online"))
+        device_name = self.get_device_name(device).casefold()
+
+        if is_online:
+            return (1, device_name, 0.0, "")
+
+        last_seen = self.parse_last_seen(device)
+        if last_seen is not None:
+            last_seen_rank = -last_seen.astimezone(timezone.utc).timestamp()
+        else:
+            last_seen_rank = float("inf")
+
+        return (2, "", last_seen_rank, device_name)
+
+    def sort_devices(self, devices):
+        # Present devices in a predictable order for the status page
+        return sorted(devices, key=self.get_device_sort_key)
+
     def extract_devices(self, data):
         # Turn the JSON into one simple list of devices to display
         devices = []
@@ -474,6 +666,7 @@ class TailscaleApp(Gtk.Window):
         if isinstance(local_device, dict) and local_device:
             local_copy = dict(local_device)
             local_copy["_section_title"] = "This Device"
+            local_copy["_is_self"] = True
             devices.append(local_copy)
 
         # Add all peer devices after that
@@ -483,9 +676,10 @@ class TailscaleApp(Gtk.Window):
                 if isinstance(peer, dict):
                     peer_copy = dict(peer)
                     peer_copy["_section_title"] = "Peer"
+                    peer_copy["_is_self"] = False
                     devices.append(peer_copy)
 
-        return devices
+        return self.sort_devices(devices)
 
     def render_status_page(self, fetch_result):
         # Redraw the status page using the latest fetched data
@@ -593,7 +787,7 @@ class TailscaleApp(Gtk.Window):
             else:
                 self.controller_page.set_subtitle_text("Desktop control panel")
                 self.controller_page.set_home_message(
-                    self.controller_notice or "Manufactured by Mushy"
+                    self.controller_notice or self.DEFAULT_CONTROLLER_MESSAGE
                 )
 
         self.render_status_page(fetch_result)
@@ -611,35 +805,26 @@ class TailscaleApp(Gtk.Window):
         self.request_status_refresh(include_controller=False)
 
     def relock_visible_page(self):
-        # Re-apply the fixed size and dock position after async UI updates settle
+        # Re-apply the fixed size after async UI updates settle
         visible_page = self.stack.get_visible_child_name() or "controller"
         GLib.idle_add(self.lock_to_page_size, visible_page)
 
+    def get_page_layout(self, page_name):
+        # Keep page sizing rules in one place
+        if page_name == "status":
+            return self.status_page, self.STATUS_MIN_WIDTH, self.STATUS_MIN_HEIGHT
+        if page_name == "account":
+            return self.account_page, self.ACCOUNT_MIN_WIDTH, self.ACCOUNT_MIN_HEIGHT
+        return self.controller_page, self.CONTROLLER_MIN_WIDTH, self.CONTROLLER_MIN_HEIGHT
+
     def lock_to_page_size(self, page_name):
         # Keep each page on a fixed size that matches its layout
-        if page_name == "status":
-            page = self.status_page
-            minimum_width = self.STATUS_MIN_WIDTH
-            minimum_height = self.STATUS_MIN_HEIGHT
-            width_padding = 0
-            height_padding = 0
-        elif page_name == "account":
-            page = self.account_page
-            minimum_width = self.ACCOUNT_MIN_WIDTH
-            minimum_height = self.ACCOUNT_MIN_HEIGHT
-            width_padding = 0
-            height_padding = 0
-        else:
-            page = self.controller_page
-            minimum_width = self.CONTROLLER_MIN_WIDTH
-            minimum_height = self.CONTROLLER_MIN_HEIGHT
-            width_padding = 0
-            height_padding = 0
+        page, minimum_width, minimum_height = self.get_page_layout(page_name)
 
         page.show()
         minimum, natural = page.get_preferred_size()
-        target_width = max(natural.width + width_padding, minimum_width)
-        target_height = max(natural.height + height_padding, minimum_height)
+        target_width = max(natural.width, minimum_width)
+        target_height = max(natural.height, minimum_height)
 
         geometry = Gdk.Geometry()
         geometry.min_width = target_width
@@ -655,26 +840,10 @@ class TailscaleApp(Gtk.Window):
         self.set_default_size(target_width, target_height)
         self.resize(target_width, target_height)
         self.set_resizable(False)
-        self.dock_to_taskbar_edge(target_width, target_height)
         return False
 
-    def dock_to_taskbar_edge(self, width, height):
-        # Sit the window in the bottom-right work area so it hugs the taskbar edge
-        screen = self.get_screen() or Gdk.Screen.get_default()
-        if screen is None:
-            return
-
-        monitor_index = screen.get_primary_monitor()
-        if monitor_index < 0:
-            monitor_index = 0
-
-        workarea = screen.get_monitor_workarea(monitor_index)
-        target_x = workarea.x + workarea.width - width - self.TASKBAR_DOCK_MARGIN
-        target_y = workarea.y + workarea.height - height - self.TASKBAR_DOCK_MARGIN
-        self.move(target_x, target_y)
-
     def on_key_press_event(self, widget, event):
-        # Escape behaves like closing a dock-style popup
+        # Escape closes the current page or the app
         if event.keyval == Gdk.KEY_Escape:
             if self.stack.get_visible_child_name() == "controller":
                 self.close()
@@ -754,22 +923,339 @@ class TailscaleApp(Gtk.Window):
 
     def on_open_status_page_clicked(self, button):
         # Refresh first, then switch to the status page
-        self.update_status()
-        self.stack.set_visible_child_name("status")
-        GLib.idle_add(self.lock_to_page_size, "status")
+        self.show_page("status", refresh_status=True)
 
     def on_open_account_page_clicked(self, button):
         # Switch to the separate account page
-        self.stack.set_visible_child_name("account")
-        GLib.idle_add(self.lock_to_page_size, "account")
+        self.show_page("account")
         self.check_account_status()
+
+    def show_sudo_explanation_dialog(self, action_label):
+        # Explain why an admin prompt is about to appear before running the command
+        dialog = Gtk.MessageDialog(
+            transient_for=self,
+            flags=Gtk.DialogFlags.MODAL,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text=f"{action_label} needs admin permission",
+        )
+        dialog.format_secondary_text(
+            "Tailscale needs elevated privileges for this action. "
+            "After you continue, a small system authentication window may appear."
+        )
+        dialog.set_title("Admin Permission Needed")
+        response = dialog.run()
+        dialog.destroy()
+        return response == Gtk.ResponseType.OK
+
+    def extract_first_url(self, text):
+        # Pull the first browser link out of command output
+        cleaned_text = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", text or "")
+        match = re.search(r"https?://[^\s\"'<>]+", cleaned_text)
+        if not match:
+            return ""
+        return match.group(0).rstrip(").,]")
+
+    def on_copy_login_link_clicked(self, button, login_url):
+        # Copy the sign-in URL and give quick button feedback
+        clipboard = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
+        clipboard.set_text(login_url, -1)
+        clipboard.store()
+        original_label = button.get_label()
+        button.set_label("Copied!")
+        GLib.timeout_add(1200, self.reset_button_label, button, original_label)
+
+    def reset_button_label(self, button, text):
+        # Restore a temporary button label
+        button.set_label(text)
+        return False
+
+    def on_login_link_clicked(self, link_button, dialog):
+        # Minimize both app windows when the sign-in link is clicked
+        if dialog is not None:
+            dialog.iconify()
+        self.iconify()
+
+    def show_login_link_dialog(self, login_url, command_output=""):
+        # Surface the Tailscale sign-in result in a friendly popup
+        dialog = Gtk.Dialog(
+            title="Complete Tailscale Sign-In",
+            transient_for=self,
+            flags=Gtk.DialogFlags.MODAL,
+        )
+        dialog.get_style_context().add_class("login-dialog")
+        dialog.add_button("Close", Gtk.ResponseType.CLOSE)
+        dialog.set_default_size(520, 320)
+
+        content_area = dialog.get_content_area()
+        content_area.set_spacing(0)
+        content_area.set_border_width(16)
+
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        card.get_style_context().add_class("login-dialog-card")
+        content_area.pack_start(card, True, True, 0)
+
+        kicker_label = Gtk.Label()
+        kicker_label.set_markup("<span size='small'><b>TAILNET ACCESS</b></span>")
+        kicker_label.set_xalign(0)
+        kicker_label.get_style_context().add_class("login-dialog-kicker")
+        card.pack_start(kicker_label, False, False, 0)
+
+        title_label = Gtk.Label()
+        title_label.set_markup("<span size='x-large'><b>Complete Sign-In</b></span>")
+        title_label.set_xalign(0)
+        title_label.get_style_context().add_class("login-dialog-title")
+        card.pack_start(title_label, False, False, 0)
+
+        intro_text = (
+            "Open this link to finish signing in to Tailscale:"
+            if login_url
+            else "Tailscale did not return a clean sign-in link, so the command output is shown below:"
+        )
+        intro_label = Gtk.Label(label=intro_text)
+        intro_label.set_xalign(0)
+        intro_label.set_line_wrap(True)
+        intro_label.get_style_context().add_class("login-dialog-body")
+        card.pack_start(intro_label, False, False, 0)
+
+        if login_url:
+            link_shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            link_shell.get_style_context().add_class("login-dialog-link-shell")
+            card.pack_start(link_shell, False, False, 0)
+
+            link_button = Gtk.LinkButton.new_with_label(login_url, "Open sign-in link")
+            link_button.set_halign(Gtk.Align.START)
+            link_button.connect("clicked", self.on_login_link_clicked, dialog)
+            link_shell.pack_start(link_button, False, False, 0)
+
+            url_label = Gtk.Label(label=login_url)
+            url_label.set_xalign(0)
+            url_label.set_line_wrap(True)
+            url_label.set_selectable(True)
+            url_label.get_style_context().add_class("login-dialog-link-value")
+            link_shell.pack_start(url_label, False, False, 0)
+
+            copy_button = Gtk.Button(label="Copy Link")
+            copy_button.get_style_context().add_class("panel-button")
+            copy_button.set_halign(Gtk.Align.START)
+            copy_button.connect("clicked", self.on_copy_login_link_clicked, login_url)
+            link_shell.pack_start(copy_button, False, False, 0)
+
+        output_text = command_output.strip()
+        if output_text:
+            output_label = Gtk.Label(label="Tailscale output")
+            output_label.set_xalign(0)
+            output_label.get_style_context().add_class("login-dialog-output-label")
+            card.pack_start(output_label, False, False, 0)
+
+            scroller = Gtk.ScrolledWindow()
+            scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
+            scroller.set_min_content_height(140)
+            scroller.get_style_context().add_class("login-dialog-output")
+            card.pack_start(scroller, True, True, 0)
+
+            output_view = Gtk.TextView()
+            output_view.set_editable(False)
+            output_view.set_cursor_visible(False)
+            output_view.set_wrap_mode(Gtk.WrapMode.WORD_CHAR)
+            output_view.get_buffer().set_text(output_text)
+            scroller.add(output_view)
+
+        dialog.show_all()
+        dialog.run()
+        dialog.destroy()
+
+    def on_login_url_ready(self, login_url):
+        # Show the link as soon as Tailscale prints it
+        self.login_link_dialog_opened = True
+        self.account_page.set_account_status(
+            "Tailscale sign-in link is ready. Use the popup window to continue."
+        )
+        self.show_login_link_dialog(login_url)
+        return False
+
+    def start_account_action(self, action):
+        if self.account_action_in_progress:
+            return
+
+        action_label = "Sign in" if action == "login" else "Sign out"
+        if not self.show_sudo_explanation_dialog(action_label):
+            return
+
+        self.account_action_in_progress = True
+        if action == "login":
+            self.login_link_dialog_opened = False
+        self.account_page.set_action_buttons_enabled(self.account_sign_in_state, busy=True)
+        self.account_page.set_account_status(f"{action_label} in progress...")
+        self.run_in_background(self.run_account_command_in_background, action)
+
+    def on_sign_in_clicked(self, button):
+        self.start_account_action("login")
+
+    def on_sign_out_clicked(self, button):
+        self.start_account_action("logout")
+
+    def run_account_command_in_background(self, action):
+        # Run the account login/logout command without blocking GTK
+        action_label = "sign in" if action == "login" else "sign out"
+        try:
+            command = ["tailscale", action]
+            command_timeout = self.TOGGLE_COMMAND_TIMEOUT_SECONDS
+
+            if action == "login":
+                # Ask tailscale to return promptly with the auth flow instead of waiting forever
+                command.append(f"--timeout={self.LOGIN_AUTH_URL_TIMEOUT}")
+                command_timeout = self.LOGIN_COMMAND_WAIT_TIMEOUT_SECONDS
+                result = self.run_login_command_with_live_output(command, command_timeout)
+            else:
+                result = self.run_privileged_command(
+                    command,
+                    timeout=command_timeout,
+                )
+        except subprocess.TimeoutExpired:
+            GLib.idle_add(
+                self.finish_account_command,
+                action,
+                None,
+                RuntimeError(f"Timed out while trying to {action_label}."),
+            )
+            return
+        except Exception as error:
+            GLib.idle_add(self.finish_account_command, action, None, error)
+            return
+
+        GLib.idle_add(self.finish_account_command, action, result, None)
+
+    def run_login_command_with_live_output(self, command, timeout):
+        # Read login output live so the auth link popup can appear immediately
+        full_command = self.build_privileged_command(command)
+        process = subprocess.Popen(
+            full_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        output_lines = []
+        login_url = ""
+        deadline = time.monotonic() + timeout
+
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    output_lines.append(line)
+                    if not login_url:
+                        login_url = self.extract_first_url(line)
+                        if login_url:
+                            GLib.idle_add(self.on_login_url_ready, login_url)
+
+                    if time.monotonic() > deadline and process.poll() is None:
+                        process.kill()
+                        raise subprocess.TimeoutExpired(full_command, timeout)
+
+            returncode = process.wait(timeout=max(1, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+            raise
+
+        combined_output = "".join(output_lines)
+        return subprocess.CompletedProcess(
+            full_command,
+            returncode,
+            stdout=combined_output,
+            stderr="",
+        )
+
+    def format_account_command_error(self, action, result):
+        # Convert common auth failures into friendlier account-page guidance
+        message = (result.stderr or result.stdout).strip()
+        lowered = message.lower()
+        action_label = "sign in" if action == "login" else "sign out"
+
+        if "not authorized" in lowered or "authentication" in lowered:
+            return f"Admin permission was denied, so the app could not {action_label}."
+
+        if (
+            "password is required" in lowered
+            or "a terminal is required" in lowered
+            or "no tty present" in lowered
+        ):
+            return (
+                f"This app could not open an admin prompt to {action_label}. "
+                "Try running it from a desktop session with PolicyKit available."
+            )
+
+        return message or f"Unable to {action_label}."
+
+    def finish_account_command(self, action, result, error):
+        self.account_action_in_progress = False
+        login_url = ""
+
+        if action == "login" and result is not None:
+            login_url = self.extract_first_url(f"{result.stdout}\n{result.stderr}")
+
+        if error is not None:
+            self.account_page.set_account_status(str(error))
+            self.account_page.set_action_buttons_enabled(self.account_sign_in_state)
+            if action == "login":
+                self.login_link_dialog_opened = False
+            self.check_account_status()
+            return False
+
+        if result.returncode != 0:
+            if action == "login" and login_url:
+                self.account_page.set_account_status(
+                    "Tailscale provided a sign-in link. Use the popup window to continue."
+                )
+                if not self.login_link_dialog_opened:
+                    self.show_login_link_dialog(login_url, result.stdout)
+            else:
+                error_message = self.format_account_command_error(action, result)
+                self.account_page.set_account_status(error_message)
+                if action == "login":
+                    self.show_login_link_dialog("", result.stdout or error_message)
+            self.account_page.set_action_buttons_enabled(self.account_sign_in_state)
+            if action == "login":
+                self.login_link_dialog_opened = False
+            self.check_account_status()
+            return False
+
+        if action == "login":
+            if login_url:
+                self.account_page.set_account_status(
+                    "Tailscale sign-in link is ready. Use the popup window to continue."
+                )
+                if not self.login_link_dialog_opened:
+                    self.show_login_link_dialog(login_url, result.stdout)
+            else:
+                self.account_page.set_account_status(
+                    "Tailscale sign-in started. Finish any browser steps if prompted."
+                )
+                self.show_login_link_dialog("", result.stdout)
+            self.login_link_dialog_opened = False
+        else:
+            self.account_page.set_account_status("You have been signed out of Tailscale.")
+
+        self.update_status()
+        self.check_account_status()
+        return False
+
+    def show_page(self, page_name, refresh_status=False):
+        # Centralize page navigation so sizing stays consistent
+        if refresh_status:
+            self.update_status()
+        self.stack.set_visible_child_name(page_name)
+        GLib.idle_add(self.lock_to_page_size, page_name)
 
     def check_account_status(self):
         # Use tailscale status to decide whether the user appears to be signed in
-        if self.account_status_check_in_progress:
+        if self.account_status_check_in_progress or self.account_action_in_progress:
             return
 
         self.account_status_check_in_progress = True
+        self.account_page.set_action_buttons_enabled("unknown", busy=True)
         self.run_in_background(self.check_account_status_in_background)
 
     def check_account_status_in_background(self):
@@ -782,6 +1268,7 @@ class TailscaleApp(Gtk.Window):
         if not fetch_result["ok"]:
             self.account_sign_in_state = "signed_out"
             self.controller_page.set_account_indicator(self.account_sign_in_state)
+            self.account_page.set_account_state(self.account_sign_in_state)
             self.account_page.set_account_status(
                 f"Could not read Tailscale status: {fetch_result['error']}"
             )
@@ -790,9 +1277,10 @@ class TailscaleApp(Gtk.Window):
         data = fetch_result["data"] or {}
         backend_state = str(data.get("BackendState", "")).lower()
 
-        if backend_state in {"", "needslogin", "stopped"}:
+        if backend_state in self.DISCONNECTED_BACKEND_STATES:
             self.account_sign_in_state = "signed_out"
             self.controller_page.set_account_indicator(self.account_sign_in_state)
+            self.account_page.set_account_state(self.account_sign_in_state)
             self.account_page.set_account_status(
                 "You are not signed in to Tailscale on this device."
             )
@@ -800,6 +1288,7 @@ class TailscaleApp(Gtk.Window):
 
         self.account_sign_in_state = "signed_in"
         self.controller_page.set_account_indicator(self.account_sign_in_state)
+        self.account_page.set_account_state(self.account_sign_in_state)
         self.account_page.set_account_status(
             f"You appear to be signed in. Backend state: {backend_state or 'unknown'}."
         )
@@ -807,9 +1296,7 @@ class TailscaleApp(Gtk.Window):
 
     def on_back_clicked(self, button):
         # Go back to the controller page
-        self.update_status()
-        self.stack.set_visible_child_name("controller")
-        GLib.idle_add(self.lock_to_page_size, "controller")
+        self.show_page("controller", refresh_status=True)
 
     def on_refresh_status_clicked(self, button):
         # Manual refresh button for the status page
@@ -894,7 +1381,7 @@ class TailscaleApp(Gtk.Window):
         try:
             result = self.run_command(
                 ["tailscale", "ping", "--c", "1", "--until-direct=false", ping_target],
-                timeout=10
+                timeout=self.PING_COMMAND_TIMEOUT_SECONDS
             )
         except subprocess.TimeoutExpired:
             GLib.idle_add(self.finish_ping_command, device_key, None, "Ping timed out.", "failure")
@@ -928,7 +1415,7 @@ class TailscaleApp(Gtk.Window):
         return False
 
 
-if __name__ == "__main__":
+def main():
     initialized, _arguments = Gtk.init_check()
     if not initialized:
         raise SystemExit("Gtk couldn't be initialized. Make sure a graphical display is available.")
@@ -944,3 +1431,8 @@ if __name__ == "__main__":
 
     # Start the GTK app loop
     Gtk.main()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

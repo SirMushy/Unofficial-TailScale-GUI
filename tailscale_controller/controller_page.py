@@ -18,6 +18,7 @@ class ControllerPage(Gtk.Box):
         # Keep a reference to the main app so buttons can call shared logic
         self.app = app
         self.set_size_request(336, 404)
+        self._toggle_icon_path = None
 
         # Center the main card on the page
         self.set_homogeneous(False)
@@ -140,11 +141,16 @@ class ControllerPage(Gtk.Box):
         return label
 
     def set_toggle_button_icon(self, icon_path):
+        # Avoid reloading the same image on every status refresh
+        if self._toggle_icon_path == icon_path:
+            return
+
         # Show a custom image on the main on/off button
         icon_path = os.fspath(icon_path)
         if not os.path.exists(icon_path):
             self.toggle_button.set_label("Toggle")
             self.toggle_button.set_image(None)
+            self._toggle_icon_path = None
             return
 
         pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
@@ -157,6 +163,7 @@ class ControllerPage(Gtk.Box):
         self.toggle_button.set_always_show_image(True)
         self.toggle_button.set_image(image)
         self.toggle_button.set_label("")
+        self._toggle_icon_path = icon_path
 
     def set_home_message(self, text):
         # Footer copy doubles as lightweight status and error feedback

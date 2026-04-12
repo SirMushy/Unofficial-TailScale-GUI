@@ -9,6 +9,6 @@ Suggested examples:
 - `unknown.png`
 
 Folder path:
-- `/home/james/ABC_Project/TailscaleApp/assets/images/os-icons`
+- `/home/james/ABC_Project/TailscaleApp/tailscale_controller/assets/images/os-icons`
 
 When you have added the files, send me the filenames you used and I will map them into the app.

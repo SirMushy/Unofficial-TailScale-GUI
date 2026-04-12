@@ -42,7 +42,7 @@ class TailscaleApp(Gtk.Window):
     TOGGLE_OFF_ICON_PATH = ASSETS_DIR / "OnOf-Icons" / "TurnOff.svg"
     CONTROLLER_MIN_WIDTH = 336
     CONTROLLER_MIN_HEIGHT = 404
-    ACCOUNT_MIN_WIDTH = 360
+    ACCOUNT_MIN_WIDTH = 340
     ACCOUNT_MIN_HEIGHT = 250
     STATUS_MIN_WIDTH = 608
     STATUS_MIN_HEIGHT = 560
@@ -970,6 +970,12 @@ class TailscaleApp(Gtk.Window):
         button.set_label(text)
         return False
 
+    def on_login_link_clicked(self, link_button, dialog):
+        # Minimize both app windows when the sign-in link is clicked
+        if dialog is not None:
+            dialog.iconify()
+        self.iconify()
+
     def show_login_link_dialog(self, login_url, command_output=""):
         # Surface the Tailscale sign-in result in a friendly popup
         dialog = Gtk.Dialog(
@@ -1019,6 +1025,7 @@ class TailscaleApp(Gtk.Window):
 
             link_button = Gtk.LinkButton.new_with_label(login_url, "Open sign-in link")
             link_button.set_halign(Gtk.Align.START)
+            link_button.connect("clicked", self.on_login_link_clicked, dialog)
             link_shell.pack_start(link_button, False, False, 0)
 
             url_label = Gtk.Label(label=login_url)

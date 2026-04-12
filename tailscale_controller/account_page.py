@@ -14,7 +14,7 @@ class AccountPage(Gtk.Box):
 
         self.app = app
         self.set_border_width(10)
-        self.set_size_request(360, 250)
+        self.set_size_request(340, 250)
 
         shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         shell.get_style_context().add_class("account-shell")
